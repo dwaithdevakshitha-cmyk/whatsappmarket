@@ -16,14 +16,17 @@ from selenium.common.exceptions import InvalidSessionIdException, TimeoutExcepti
 from selenium.webdriver.common.action_chains import ActionChains  # type: ignore
 
 # --- USER CONFIGURATION ---
-EXCEL_PATH = r"C:\Users\HP\Documents\Trip flux marketing\Associate-Travel-Sal_20260305145604_103.xlsx"
+EXCEL_PATH = r"C:\Users\HP\Downloads\associate 7.xlsx"
 MEDIA_PATHS = [
+    r"C:\Users\HP\Documents\Trip flux marketing banners\gokarna.png",
+    r"C:\Users\HP\Documents\Trip flux marketing banners\kashi.png",
     r"C:\Users\HP\Documents\Trip flux marketing banners\kashi-nepal-mukthinath yathra.png",
+    r"C:\Users\HP\Documents\Trip flux marketing banners\manali.png",
+    r"C:\Users\HP\Documents\Trip flux marketing banners\Mansarovar package.png",
     r"C:\Users\HP\Documents\Trip flux marketing banners\Shri Ramayana yatra Sri Lanka Banner.png",
     r"C:\Users\HP\Documents\Trip flux marketing banners\Yamuna pushkaralu.png"
 ]
-MESSAGE_TEXT = """Job Summary:The Associate Travel Sales Executive supports the sales team by assisting customers with travel-related products and services. The role focuses on understanding client needs, promoting travel packages, closing sales, and ensuring excellent customer service before and after booking.Roles and ResponsibilitiesAssist customers with inquiries related to tour packages, flights, hotels, visas, and travel insuranceUnderstand customer preferences and recommend suitable travel productsExplain itineraries, pricing, inclusions, and exclusions clearly to clientsGenerate and follow up on sales leads via phone, email, or in personAchieve assigned sales targets and contribute to team revenue goalsMaintain accurate customer records and sales reportsHandle customer complaints or issues professionally and escalate when neededStay updated on travel trends, destinations, and promotional offersRequired Skills and QualificationsStrong communication and interpersonal skillsBasic knowledge of travel destinations and booking systems (preferred)Sales-oriented mindset with customer-focused approachAbility to work under targets and deadlines10th Pass , Intermediate, Graduate or diploma in Travel, Tourism, Sales, or related field (preferred)
-Interested candidates can apply!"""
+MESSAGE_TEXT = """Job SummaryThe Associate Travel Sales Executive supports the sales team by assisting customers with travel-related products and services. The role focuses on understanding client needs, promoting travel packages, closing sales, and ensuring excellent customer service before and after booking.Roles and ResponsibilitiesAssist customers with inquiries related to tour packages, flights, hotels, visas, and travel insuranceUnderstand customer preferences and recommend suitable travel productsExplain itineraries, pricing, inclusions, and exclusions clearly to clientsGenerate and follow up on sales leads via phone, email, or in personAchieve assigned sales targets and contribute to team revenue goalsMaintain accurate customer records and sales reportsHandle customer complaints or issues professionally and escalate when neededStay updated on travel trends, destinations, and promotional offersRequired Skills and QualificationsStrong communication and interpersonal skillsBasic knowledge of travel destinations and booking systems (preferred)Sales-oriented mindset with customer-focused approachAbility to work under targets and deadlines10th Pass , Intermediate, Graduate or diploma in Travel, Tourism, Sales, or related field (preferred)"""
 # --------------------------
 
 # Load Excel
@@ -47,6 +50,8 @@ try:
     STATUS_COLUMN = 'DELIVERY STATUS'
     if STATUS_COLUMN not in df.columns:
         df[STATUS_COLUMN] = "PENDING"
+    else:
+        df[STATUS_COLUMN] = df[STATUS_COLUMN].astype(str)
     
     print(f"Loaded Excel. Header found at row {header_row_index}. Total records: {len(df)}")
 except Exception as e:
@@ -89,14 +94,35 @@ if not phone_column:
     sys.exit(1)
 
 # --- CLEANING AND FILTERING ---
-# 1. Remove duplicates based on phone number
+# 1. Clean phone numbers first to ensure accurate deduplication
+def _clean_phone(x):
+    p = str(x).split(',')[0].split('/')[0].strip()
+    p = p.split('.')[0].strip()
+    return "".join(filter(str.isdigit, p))
+
+df[phone_column] = df[phone_column].apply(_clean_phone)
+
+# 1.5. Check global master list to prevent cross-file repeat sends
+MASTER_LOG_PATH = "sent_numbers_history.txt"
+if os.path.exists(MASTER_LOG_PATH):
+    with open(MASTER_LOG_PATH, "r") as f:
+        global_handled = set(line.strip() for line in f if line.strip())
+    df.loc[df[phone_column].isin(global_handled) & (df[STATUS_COLUMN].isin(['PENDING', 'nan']) | df[STATUS_COLUMN].isna()), STATUS_COLUMN] = "ALREADY_PROCESSED"
+
+# 1.6. Propagate 'SENT' to all duplicates inside this specific file
+handled_statuses = ['SENT', 'ALREADY_PROCESSED', 'INVALID_NUMBER', 'FAILED_IMAGE', 'INVALID_FORMAT']
+handled_numbers = df[df[STATUS_COLUMN].isin(handled_statuses)][phone_column].unique()
+df.loc[df[phone_column].isin(handled_numbers) & (df[STATUS_COLUMN].isin(['PENDING', 'nan']) | df[STATUS_COLUMN].isna()), STATUS_COLUMN] = "SENT_DUPLICATE"
+
+# 2. Remove duplicates based on phone number
 initial_count = len(df)
 df = df.drop_duplicates(subset=[phone_column], keep='first')
 if len(df) < initial_count:
     print(f"Removed {initial_count - len(df)} duplicate phone numbers.")
 
 # 2. Skip already sent or invalid numbers
-df_to_process = df[df[STATUS_COLUMN].isin(['PENDING', 'FAILED', 'nan']) | df[STATUS_COLUMN].isna()]
+retry_statuses = ['PENDING', 'FAILED', 'ERROR', 'FAILED_IMAGE', 'TIMEOUT', 'nan']
+df_to_process = df[df[STATUS_COLUMN].isin(retry_statuses) | df[STATUS_COLUMN].isna()]
 print(f"Skipping {len(df) - len(df_to_process)} numbers already marked as SENT or INVALID.")
 
 def save_excel_progress():
@@ -104,17 +130,16 @@ def save_excel_progress():
     try:
         df.to_excel(EXCEL_PATH, index=False)
     except Exception as e:
-        print(f"\n⚠️ WARNING: Could not save to Excel: {e}")
+        print(f"\nWARNING: Could not save to Excel: {e}")
         print("Please CLOSE the Excel file if it is open so the script can update status!")
 
 for i_idx, (index, row) in enumerate(df_to_process.iterrows()):
     phone = ""
     try:
-        raw_phone = str(row[phone_column]).split('.')[0].strip()
-        phone = "".join(filter(str.isdigit, raw_phone))
+        phone = str(row[phone_column])
         
         if not phone or len(phone) < 10:
-            print(f"[{i_idx+1}] Skipping invalid phone number format: {raw_phone}")
+            print(f"[{i_idx+1}] Skipping invalid phone number format: {phone}")
             df.at[index, STATUS_COLUMN] = "INVALID_FORMAT"
             save_excel_progress()
             continue
@@ -163,6 +188,8 @@ for i_idx, (index, row) in enumerate(df_to_process.iterrows()):
             if is_invalid:
                 print(f"[{i_idx+1}] Skipping: Number {phone} does not have a WhatsApp account.")
                 df.at[index, STATUS_COLUMN] = "INVALID_NUMBER"
+                with open(MASTER_LOG_PATH, "a") as f:
+                    f.write(phone + "\n")
                 save_excel_progress()
                 continue
                 
@@ -172,7 +199,7 @@ for i_idx, (index, row) in enumerate(df_to_process.iterrows()):
             save_excel_progress()
             continue
 
-        # 2. Send text
+        # 2. Send text separately (chat box supports 65k characters, skipping image caption limit of 1024 entirely)
         try:
             chat_box = wait.until(EC.presence_of_element_located((By.XPATH, '//div[@title="Type a message"] | //div[@contenteditable="true"][@data-tab="10"] | //footer//div[@contenteditable="true"]')))
             actions = ActionChains(driver)
@@ -188,25 +215,50 @@ for i_idx, (index, row) in enumerate(df_to_process.iterrows()):
             save_excel_progress()
             continue
 
-        # 3. Send images
-        import subprocess
-        for media_path in MEDIA_PATHS:
-            try:
-                safe_path = media_path.replace("'", "''")
-                subprocess.run(['powershell', '-command', f"Set-Clipboard -Path '{safe_path}'"], shell=True)
-                chat_box = wait.until(EC.presence_of_element_located((By.XPATH, '//div[@title="Type a message"] | //div[@contenteditable="true"][@data-tab="10"] | //footer//div[@contenteditable="true"]')))
-                actions = ActionChains(driver)
-                actions.move_to_element(chat_box).click().pause(1).key_down(Keys.CONTROL).send_keys('v').key_up(Keys.CONTROL).perform()
-                time.sleep(2)
-                send_btn = wait.until(EC.element_to_be_clickable((By.XPATH, '//div[@aria-label="Send"] | //span[@data-icon="send"]')))
-                send_btn.click()
-                time.sleep(5)
-            except Exception as e:
-                print(f"[{i_idx+1}] Could not upload file {media_path}: {e}")
-                continue
+        # 3. Send images directly afterwards
+        try:
+            import subprocess
+            if MEDIA_PATHS:
+                abs_paths = [os.path.abspath(p) for p in MEDIA_PATHS if os.path.exists(p)]
+                if abs_paths:
+                    # Explicitly use the PowerShell clipboard array method for the images
+                    ps_paths = ", ".join([f"'{p.replace('\'', '\'\'')}'" for p in abs_paths])
+                    subprocess.run(['powershell', '-command', f"Set-Clipboard -Path {ps_paths}"], shell=True)
+                    
+                    chat_box = wait.until(EC.presence_of_element_located((By.XPATH, '//div[@title="Type a message"] | //div[@contenteditable="true"][@data-tab="10"] | //footer//div[@contenteditable="true"]')))
+                    actions = ActionChains(driver)
+                    actions.move_to_element(chat_box).click().pause(1).key_down(Keys.CONTROL).send_keys('v').key_up(Keys.CONTROL).perform()
+                    
+                    # Wait specifically for the image modal to fully open
+                    time.sleep(8)
+                    
+                    # First attempt: simply press ENTER which natively sends the images from the open modal
+                    try:
+                        actions = ActionChains(driver)
+                        actions.send_keys(Keys.ENTER).perform()
+                    except Exception as e:
+                        print(f"[{i_idx+1}] Enter key failed: {e}")
+                    
+                    time.sleep(3)
+                    
+                    # Second attempt (Fallback): visually locate and click the Send button
+                    try:
+                        send_btn = driver.find_element(By.XPATH, '//div[@aria-label="Send" or @aria-label="Send " or @data-testid="send"] | //span[@data-icon="send"]/..')
+                        actions = ActionChains(driver)
+                        actions.move_to_element(send_btn).click().perform()
+                    except Exception:
+                        pass
+                    time.sleep(5)
+        except Exception as e:
+            print(f"[{i_idx+1}] Could not upload images: {e}")
+            df.at[index, STATUS_COLUMN] = "FAILED_IMAGE"
+            save_excel_progress()
+            continue
         
         print(f"[{i_idx+1}] Successfully sent to: {phone}")
         df.at[index, STATUS_COLUMN] = "SENT"
+        with open(MASTER_LOG_PATH, "a") as f:
+            f.write(phone + "\n")
         save_excel_progress()
 
     except InvalidSessionIdException:
@@ -219,6 +271,5 @@ for i_idx, (index, row) in enumerate(df_to_process.iterrows()):
 
     time.sleep(20)
 
-print("All tasks finished.")
-print("\n🎉 All tasks finished.")
+print("\nAll tasks finished.")
 driver.quit()  # type: ignore
